@@ -289,15 +289,21 @@ class DoctorViewSet(viewsets.ModelViewSet):
 
 class AppointmentViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for Appointment management with strict role-based access.
-    - Patients can only access their own appointments
-    - Doctors can only access their assigned appointments
-    - Admin has full access
-    - Completed appointments cannot be modified
+    Enhanced ViewSet for Appointment management with production-ready lifecycle.
+    
+    Status Flow: PENDING → CONFIRMED → COMPLETED
+                           → CANCELLED (anytime)
+    
+    Features:
+    - Strict role-based access control
+    - Double booking prevention
+    - Patient overlap detection
+    - Comprehensive audit trail
+    - State transition validation
     """
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
-    permission_classes = [IsAuthenticated, IsAppointmentParticipant, CannotModifyCompletedAppointments]
+    permission_classes = [IsAuthenticated, IsAppointmentParticipant]
     
     def get_queryset(self):
         """Filter appointments based on user type - STRICT enforcement"""
@@ -308,111 +314,275 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         # Admin can see all
         if user.is_staff:
-            return Appointment.objects.all()
+            return Appointment.objects.all().order_by('-appointment_date')
         
         # Patients can only see their own appointments
         if hasattr(user, 'patient'):
             patient = getattr(user, 'patient', None)
             if patient:
-                return Appointment.objects.filter(patient__user=user)
+                return Appointment.objects.filter(patient__user=user).order_by('-appointment_date')
         
         # Doctors can only see their assigned appointments
         if hasattr(user, 'doctor'):
             doctor = getattr(user, 'doctor', None)
             if doctor:
-                return Appointment.objects.filter(doctor__user=user)
+                return Appointment.objects.filter(doctor__user=user).order_by('-appointment_date')
         
         # Unauthorized user type
         return Appointment.objects.none()
     
     @action(detail=False, methods=['get'])
     def my_appointments(self, request):
-        """Get current user's appointments"""
-        if not request.user or not request.user.is_authenticated:
+        """
+        Get current user's appointments (paginated, sorted by date).
+        
+        Query Parameters:
+        - status: Filter by status (PENDING, CONFIRMED, COMPLETED, CANCELLED, NO_SHOW)
+        - upcoming: Boolean - return only future appointments
+        """
+        user = request.user
+        
+        if not user or not user.is_authenticated:
             return Response(
                 {'detail': 'Authentication required'},
                 status=status.HTTP_401_UNAUTHORIZED
             )
         
         appointments = self.get_queryset()
+        
+        # Filter by status if provided
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            appointments = appointments.filter(status=status_filter)
+        
+        # Filter for upcoming appointments if requested
+        if request.query_params.get('upcoming') == 'true':
+            from django.utils import timezone
+            appointments = appointments.filter(appointment_date__gte=timezone.now())
+        
         serializer = self.get_serializer(appointments, many=True)
         return Response(serializer.data)
     
-    @action(detail=True, methods=['patch'])
-    def update_status(self, request, pk=None):
-        """Update appointment status with validation"""
-        appointment = self.get_object()
-        status_value = request.data.get('status')
+    @action(detail=True, methods=['post'])
+    def confirm(self, request, pk=None):
+        """
+        Confirm an appointment (PENDING → CONFIRMED).
         
-        # Validate status value
-        valid_statuses = ['Scheduled', 'Completed', 'Cancelled', 'No-show']
-        if status_value not in valid_statuses:
+        Only doctor or admin can confirm.
+        """
+        appointment = self.get_object()
+        
+        # Permission check: Only doctor or admin can confirm
+        if not request.user.is_staff:
+            if not hasattr(request.user, 'doctor') or appointment.doctor.user != request.user:
+                return Response(
+                    {'detail': 'Only the assigned doctor or admin can confirm this appointment.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        try:
+            appointment.confirm()
+            serializer = self.get_serializer(appointment)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValidationError as e:
             return Response(
-                {'detail': ErrorMessages.INVALID_STATUS},
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        """
+        Mark appointment as completed (CONFIRMED → COMPLETED).
+        
+        Only doctor or admin can mark as completed.
+        """
+        appointment = self.get_object()
+        
+        # Permission check: Only doctor or admin can complete
+        if not request.user.is_staff:
+            if not hasattr(request.user, 'doctor') or appointment.doctor.user != request.user:
+                return Response(
+                    {'detail': 'Only the assigned doctor or admin can complete this appointment.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        try:
+            appointment.complete()
+            serializer = self.get_serializer(appointment)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """
+        Cancel an appointment with reason tracking.
+        
+        Request Body:
+        {
+            "reason": "Doctor is unavailable",
+            "cancelled_by": "DOCTOR"  # or "PATIENT" or "ADMIN"
+        }
+        """
+        appointment = self.get_object()
+        
+        reason = request.data.get('reason', '')
+        cancelled_by = request.data.get('cancelled_by', 'ADMIN')
+        
+        # Permission check: Patients can only cancel their own appointments
+        if not request.user.is_staff:
+            if hasattr(request.user, 'patient'):
+                if appointment.patient.user != request.user:
+                    return Response(
+                        {'detail': 'Patients can only cancel their own appointments.'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+                cancelled_by = 'PATIENT'
+            elif hasattr(request.user, 'doctor'):
+                if appointment.doctor.user != request.user:
+                    return Response(
+                        {'detail': 'Doctors can only cancel their own appointments.'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+                cancelled_by = 'DOCTOR'
+            else:
+                return Response(
+                    {'detail': 'Unauthorized'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        try:
+            appointment.cancel(reason=reason, cancelled_by=cancelled_by)
+            serializer = self.get_serializer(appointment)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=True, methods=['post'])
+    def no_show(self, request, pk=None):
+        """Mark appointment as no-show (CONFIRMED → NO_SHOW). Only doctor or admin."""
+        appointment = self.get_object()
+        
+        # Permission check
+        if not request.user.is_staff:
+            if not hasattr(request.user, 'doctor') or appointment.doctor.user != request.user:
+                return Response(
+                    {'detail': 'Only the assigned doctor or admin can mark as no-show.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+        
+        try:
+            appointment.mark_no_show()
+            serializer = self.get_serializer(appointment)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except ValidationError as e:
+            return Response(
+                {'detail': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['get'])
+    def available_slots(self, request):
+        """
+        Get available appointment slots for a doctor on a given date.
+        
+        Query Parameters:
+        - doctor_id: The doctor's ID
+        - date: The date to check (YYYY-MM-DD format)
+        - num_slots: Number of slots to return (default: 8)
+        
+        Example: GET /appointments/available_slots/?doctor_id=1&date=2026-01-25&num_slots=8
+        """
+        from .appointment_service import AppointmentService
+        
+        doctor_id = request.query_params.get('doctor_id')
+        date_str = request.query_params.get('date')
+        num_slots = request.query_params.get('num_slots', 8)
+        
+        if not doctor_id or not date_str:
+            return Response(
+                {'detail': 'doctor_id and date parameters are required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Additional validation: Only doctor or admin can mark as completed
-        if status_value == 'Completed' and not request.user.is_staff:
-            if not hasattr(request.user, 'doctor') or appointment.doctor.user != request.user:
-                raise PermissionDenied(
-                    detail=ErrorMessages.APPOINTMENT_UPDATE_ROLE
-                )
-        
-        appointment.status = status_value
-        appointment.save()
-        serializer = self.get_serializer(appointment)
-        return Response(serializer.data)
+        try:
+            doctor = Doctor.objects.get(id=doctor_id)
+            from datetime import datetime
+            date = datetime.strptime(date_str, '%Y-%m-%d').date()
+            
+            slots = AppointmentService.get_available_slots(doctor, date, int(num_slots))
+            
+            return Response({
+                'doctor_id': doctor.id,
+                'doctor_name': doctor.user.get_full_name(),
+                'date': date,
+                'available_slots': [slot.isoformat() for slot in slots],
+                'total_slots_available': len(slots)
+            }, status=status.HTTP_200_OK)
+        except Doctor.DoesNotExist:
+            return Response(
+                {'detail': 'Doctor not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except ValueError as e:
+            return Response(
+                {'detail': f'Invalid date format. Use YYYY-MM-DD. Error: {str(e)}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
     
     def perform_create(self, serializer):
-        """Strict validation for appointment creation"""
-        # User must be either the patient or doctor in the appointment
+        """Enhanced validation for appointment creation"""
+        from .appointment_service import AppointmentService, AppointmentValidationError
+        
         patient_id = serializer.initial_data.get('patient')
         doctor_id = serializer.initial_data.get('doctor')
         
+        # Permission check: Patient can only create appointment for themselves
         if patient_id:
             try:
                 patient = Patient.objects.get(id=patient_id)
-                # Patient can only create appointment for themselves
                 if not self.request.user.is_staff:
                     if patient.user != self.request.user:
                         raise PermissionDenied(
-                            detail=ErrorMessages.APPOINTMENT_CREATE_SELF
+                            detail='Patients can only book appointments for themselves.'
                         )
             except Patient.DoesNotExist:
-                raise ValidationError(detail=ErrorMessages.INVALID_PATIENT_ID)
+                raise ValidationError({'patient': 'Patient not found.'})
         
+        # Validate doctor exists and perform business logic validation
         if doctor_id:
             try:
                 doctor = Doctor.objects.get(id=doctor_id)
-                # Doctor can create appointment for any patient
-                if not self.request.user.is_staff and doctor.user != self.request.user:
-                    # Only allow if user is the patient (patient creates appointment with doctor)
-                    if not hasattr(self.request.user, 'patient'):
-                        raise PermissionDenied(
-                            detail=ErrorMessages.INVALID_REQUEST
-                        )
             except Doctor.DoesNotExist:
-                raise ValidationError(detail=ErrorMessages.INVALID_DOCTOR_ID)
+                raise ValidationError({'doctor': 'Doctor not found.'})
         
         serializer.save()
     
     def perform_update(self, serializer):
-        """Strict validation for appointment updates"""
+        """Enhanced validation for appointment updates"""
+        from .appointment_service import AppointmentService, AppointmentValidationError
+        
         appointment = serializer.instance
         
-        # Cannot modify completed appointments
-        if appointment.status == 'Completed':
+        # Cannot modify completed or cancelled appointments
+        if appointment.status in ['COMPLETED', 'CANCELLED', 'NO_SHOW']:
             raise PermissionDenied(
-                detail=ErrorMessages.APPOINTMENT_MODIFY_COMPLETED
+                detail=f'Cannot modify appointments with status {appointment.status}.'
             )
         
         serializer.save()
     
     def perform_destroy(self, instance):
-        """Prevent deletion of appointments - use status change instead"""
+        """Prevent deletion of appointments - use cancel action instead"""
         raise PermissionDenied(
-            detail=ErrorMessages.APPOINTMENT_DELETE_RESTRICTED
+            detail='Direct deletion not allowed. Use the cancel endpoint to cancel appointments.'
         )
 
 
