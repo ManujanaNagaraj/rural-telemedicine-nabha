@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import Patient, Doctor, Appointment
+from .models import (
+    Patient, Doctor, Appointment, Pharmacy, Medicine, PharmacyInventory,
+    Notification, NotificationPreference
+)
 from .appointment_service import AppointmentService, AppointmentValidationError
 
 
@@ -167,3 +170,162 @@ class AppointmentAvailableSlotsSerializer(serializers.Serializer):
                 "Either doctor_id or specialization must be provided."
             )
         return data
+
+
+class MedicineSerializer(serializers.ModelSerializer):
+    """Serializer for Medicine model."""
+    
+    available_pharmacies_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = Medicine
+        fields = [
+            'id', 'name', 'description', 'is_prescription_required',
+            'available_pharmacies_count', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_available_pharmacies_count(self, obj):
+        """Count of pharmacies that have this medicine in stock."""
+        return obj.get_available_pharmacies().count()
+
+
+class PharmacySerializer(serializers.ModelSerializer):
+    """Serializer for Pharmacy model."""
+    
+    available_medicines_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = Pharmacy
+        fields = [
+            'id', 'name', 'location', 'contact_number', 'address',
+            'is_active', 'available_medicines_count', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_available_medicines_count(self, obj):
+        """Count of medicines available in this pharmacy."""
+        return obj.get_available_medicines().count()
+
+
+class PharmacyInventorySerializer(serializers.ModelSerializer):
+    """Serializer for PharmacyInventory model."""
+    
+    medicine_name = serializers.CharField(source='medicine.name', read_only=True)
+    pharmacy_name = serializers.CharField(source='pharmacy.name', read_only=True)
+    pharmacy_location = serializers.CharField(source='pharmacy.location', read_only=True)
+    is_prescription_required = serializers.BooleanField(
+        source='medicine.is_prescription_required',
+        read_only=True
+    )
+    is_available = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = PharmacyInventory
+        fields = [
+            'id', 'pharmacy', 'pharmacy_name', 'pharmacy_location',
+            'medicine', 'medicine_name', 'is_prescription_required',
+            'quantity_available', 'is_available',
+            'last_updated', 'created_at'
+        ]
+        read_only_fields = [
+            'id', 'pharmacy_name', 'pharmacy_location', 'medicine_name',
+            'is_prescription_required', 'last_updated', 'created_at'
+        ]
+    
+    def get_is_available(self, obj):
+        """Check if medicine is available."""
+        return obj.is_available()
+
+
+class PharmacyInventoryUpdateSerializer(serializers.Serializer):
+    """Serializer for updating pharmacy inventory quantity."""
+    
+    quantity = serializers.IntegerField(min_value=0, help_text="New quantity to set")
+    reason = serializers.CharField(
+        max_length=255,
+        required=False,
+        allow_blank=True,
+        help_text="Reason for update (optional)"
+    )
+
+
+class MedicineAvailabilitySerializer(serializers.Serializer):
+    """Serializer for medicine availability response."""
+    
+    medicine_id = serializers.IntegerField()
+    medicine_name = serializers.CharField()
+    is_prescription_required = serializers.BooleanField()
+    pharmacies = serializers.SerializerMethodField()
+    total_available_at = serializers.SerializerMethodField()
+    
+    def get_pharmacies(self, obj):
+        """Get pharmacies with availability details."""
+        inventory_items = obj['inventory_items']
+        return [
+            {
+                'pharmacy_id': item.pharmacy.id,
+                'pharmacy_name': item.pharmacy.name,
+                'location': item.pharmacy.location,
+                'contact_number': item.pharmacy.contact_number,
+                'quantity_available': item.quantity_available,
+                'last_updated': item.last_updated
+            }
+            for item in inventory_items
+        ]
+    
+    def get_total_available_at(self, obj):
+        """Get total number of pharmacies with this medicine in stock."""
+        return len(obj['inventory_items'])
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    """Serializer for Notification model."""
+    
+    user_username = serializers.CharField(source='user.username', read_only=True)
+    appointment_date = serializers.DateTimeField(
+        source='appointment.appointment_date',
+        read_only=True,
+        allow_null=True
+    )
+    medicine_name = serializers.CharField(source='medicine.name', read_only=True, allow_null=True)
+    pharmacy_name = serializers.CharField(source='pharmacy.name', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = Notification
+        fields = [
+            'id', 'user', 'user_username', 'title', 'message',
+            'notification_type', 'is_read', 'read_at',
+            'appointment', 'appointment_date',
+            'medicine', 'medicine_name',
+            'pharmacy', 'pharmacy_name',
+            'created_at'
+        ]
+        read_only_fields = [
+            'id', 'user', 'user_username', 'appointment_date',
+            'medicine_name', 'pharmacy_name', 'created_at', 'read_at'
+        ]
+
+
+class NotificationMarkReadSerializer(serializers.Serializer):
+    """Serializer for marking notification as read."""
+    
+    is_read = serializers.BooleanField(default=True)
+
+
+class NotificationPreferenceSerializer(serializers.ModelSerializer):
+    """Serializer for NotificationPreference model."""
+    
+    username = serializers.CharField(source='user.username', read_only=True)
+    
+    class Meta:
+        model = NotificationPreference
+        fields = [
+            'id', 'user', 'username',
+            'appointment_notifications', 'medicine_notifications',
+            'pharmacy_notifications', 'system_notifications',
+            'preferred_delivery',
+            'quiet_hours_enabled', 'quiet_hours_start', 'quiet_hours_end',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'user', 'username', 'created_at', 'updated_at']
