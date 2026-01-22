@@ -3,7 +3,7 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     PatientViewSet, DoctorViewSet, AppointmentViewSet, 
-    CustomTokenObtainPairView, LoginView
+    CustomTokenObtainPairView, LoginView, symptom_checker
 )
 
 router = DefaultRouter()
@@ -21,4 +21,7 @@ urlpatterns = [
     path('auth/login/', LoginView.as_view({'post': 'login'}), name='auth_login'),
     path('auth/logout/', LoginView.as_view({'post': 'logout'}), name='auth_logout'),
     path('auth/me/', LoginView.as_view({'get': 'me'}), name='auth_me'),
+    
+    # AI Symptom Checker endpoint (no authentication required - public triage)
+    path('symptom-check/', symptom_checker, name='symptom_checker'),
 ] + router.urls

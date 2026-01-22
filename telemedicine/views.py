@@ -1,7 +1,7 @@
 from rest_framework import viewsets, status
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly
+from rest_framework.permissions import IsAuthenticated, IsAuthenticatedOrReadOnly, AllowAny
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -20,6 +20,7 @@ from .auth_serializers import (
     UserSerializer, LogoutSerializer
 )
 from .error_messages import ErrorMessages
+from .ai.rule_engine import evaluate_symptoms
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -413,3 +414,79 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         raise PermissionDenied(
             detail=ErrorMessages.APPOINTMENT_DELETE_RESTRICTED
         )
+
+
+@api_view(['POST'])
+def symptom_checker(request):
+    """
+    AI-Based Symptom Checker Endpoint
+    
+    This endpoint provides a DECISION-SUPPORT TOOL for initial symptom assessment.
+    It is NOT a medical diagnosis system.
+    
+    Endpoint: POST /api/symptom-check/
+    Authentication: Not required (public health screening)
+    
+    Request Body:
+    {
+        "symptoms": ["fever", "cough", "headache"]
+    }
+    
+    Response:
+    {
+        "status": "success",
+        "matched_conditions": ["viral_infection", "common_cold"],
+        "risk_level": "LOW",
+        "risk_score": 15,
+        "advisory_message": "...",
+        "unknown_symptoms": [],
+        "confidence": "HIGH",
+        "disclaimer": "..."
+    }
+    
+    Error Response (400):
+    {
+        "status": "error",
+        "error_code": "EMPTY_SYMPTOMS",
+        "message": "No symptoms provided. Please report at least one symptom for evaluation.",
+        "matched_conditions": [],
+        "risk_level": null,
+        "risk_score": 0
+    }
+    """
+    
+    # Allow public access (no authentication required for health screening)
+    permission_classes = [AllowAny]
+    
+    if request.method == 'POST':
+        # Get symptoms from request
+        symptoms_data = request.data.get('symptoms', [])
+        
+        # Validate input type
+        if not isinstance(symptoms_data, list):
+            return Response({
+                'status': 'error',
+                'error_code': 'INVALID_INPUT_FORMAT',
+                'message': 'Symptoms must be provided as a list. Example: {"symptoms": ["fever", "cough"]}',
+                'matched_conditions': [],
+                'risk_level': None,
+                'risk_score': 0,
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Evaluate symptoms using AI rule engine
+        result = evaluate_symptoms(symptoms_data)
+        
+        # Determine HTTP status code based on result
+        if result.get('status') == 'error':
+            response_status = status.HTTP_400_BAD_REQUEST
+        else:
+            response_status = status.HTTP_200_OK
+        
+        return Response(result, status=response_status)
+    
+    else:
+        # Only POST allowed
+        return Response({
+            'detail': 'Method not allowed. Use POST to submit symptoms.',
+            'allowed_methods': ['POST']
+        }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
