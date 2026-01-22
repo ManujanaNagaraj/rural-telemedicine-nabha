@@ -149,3 +149,357 @@ class Appointment(models.Model):
             raise ValidationError(f"Can only mark confirmed appointments as no-show")
         self.status = 'NO_SHOW'
         self.save()
+
+
+class Pharmacy(models.Model):
+    """
+    Pharmacy model for rural healthcare supply chain.
+    
+    Represents a pharmacy/chemist shop in the village/area.
+    Can be offline or online, with local medicine inventory.
+    """
+    
+    name = models.CharField(
+        max_length=255,
+        help_text="Name of the pharmacy"
+    )
+    location = models.CharField(
+        max_length=255,
+        help_text="Village name / area / region"
+    )
+    contact_number = models.CharField(
+        max_length=15,
+        help_text="Contact phone number"
+    )
+    address = models.TextField(
+        help_text="Detailed address for rural location"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this pharmacy is currently operational"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['location']),
+            models.Index(fields=['is_active']),
+        ]
+    
+    def __str__(self):
+        return f"{self.name} ({self.location})"
+    
+    def get_available_medicines(self):
+        """Get all medicines available in this pharmacy (quantity > 0)."""
+        return self.inventory.filter(quantity_available__gt=0)
+
+
+class Medicine(models.Model):
+    """
+    Medicine/medication model for healthcare supply chain.
+    
+    Stores medicine information including name, description,
+    and whether prescription is required.
+    """
+    
+    name = models.CharField(
+        max_length=255,
+        unique=True,
+        help_text="Medicine name (e.g., Paracetamol, Aspirin)"
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Detailed description, dosage info, uses"
+    )
+    is_prescription_required = models.BooleanField(
+        default=False,
+        help_text="Whether prescription is required to purchase"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['is_prescription_required']),
+        ]
+    
+    def __str__(self):
+        return self.name
+    
+    def get_available_pharmacies(self):
+        """Get all pharmacies that have this medicine in stock."""
+        return Pharmacy.objects.filter(
+            inventory__medicine=self,
+            inventory__quantity_available__gt=0,
+            is_active=True
+        ).distinct()
+
+
+class PharmacyInventory(models.Model):
+    """
+    Pharmacy inventory model for medicine availability tracking.
+    
+    Links pharmacy + medicine with quantity and last update timestamp.
+    Designed for rural areas with low internet - can sync when online.
+    """
+    
+    pharmacy = models.ForeignKey(
+        Pharmacy,
+        on_delete=models.CASCADE,
+        related_name='inventory',
+        help_text="The pharmacy that stocks this medicine"
+    )
+    medicine = models.ForeignKey(
+        Medicine,
+        on_delete=models.CASCADE,
+        related_name='pharmacy_inventory',
+        help_text="The medicine being stocked"
+    )
+    quantity_available = models.PositiveIntegerField(
+        default=0,
+        help_text="Current quantity available (units)"
+    )
+    last_updated = models.DateTimeField(
+        auto_now=True,
+        help_text="When the quantity was last updated"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ['pharmacy', 'medicine']
+        ordering = ['-last_updated']
+        indexes = [
+            models.Index(fields=['pharmacy', 'quantity_available']),
+            models.Index(fields=['medicine', 'quantity_available']),
+            models.Index(fields=['last_updated']),
+        ]
+    
+    def __str__(self):
+        return f"{self.medicine.name} @ {self.pharmacy.name}: {self.quantity_available} units"
+    
+    def clean(self):
+        """Validate inventory data."""
+        if self.quantity_available < 0:
+            raise ValidationError("Quantity available cannot be negative.")
+    
+    def save(self, *args, **kwargs):
+        """Ensure validation runs before saving."""
+        self.clean()
+        super().save(*args, **kwargs)
+    
+    def is_available(self):
+        """Check if medicine is available at this pharmacy."""
+        return self.quantity_available > 0
+    
+    def update_quantity(self, quantity, reason=""):
+        """
+        Update inventory quantity.
+        
+        Args:
+            quantity (int): New quantity (must be >= 0)
+            reason (str): Reason for update (optional)
+            
+        Raises:
+            ValidationError: If quantity is negative
+        """
+        if quantity < 0:
+            raise ValidationError("Quantity cannot be negative.")
+        
+        self.quantity_available = quantity
+        self.save()
+    
+    def add_stock(self, quantity):
+        """Add to existing stock."""
+        if quantity < 0:
+            raise ValidationError("Cannot add negative quantity.")
+        self.quantity_available += quantity
+        self.save()
+    
+    def remove_stock(self, quantity):
+        """Remove from stock, ensuring quantity doesn't go negative."""
+        if quantity < 0:
+            raise ValidationError("Cannot remove negative quantity.")
+        if self.quantity_available < quantity:
+            raise ValidationError(
+                f"Cannot remove {quantity} units. Only {self.quantity_available} available."
+            )
+        self.quantity_available -= quantity
+        self.save()
+
+
+class Notification(models.Model):
+    """
+    Notification model for healthcare alerts and reminders.
+    
+    Supports multiple notification types:
+    - APPOINTMENT: Appointment-related notifications
+    - MEDICINE: Medicine availability and alerts
+    - SYSTEM: System-level notifications
+    
+    Designed for low-bandwidth rural environments.
+    Text-only payloads suitable for SMS gateway integration.
+    """
+    
+    # Notification types
+    NOTIFICATION_TYPES = [
+        ('APPOINTMENT', 'Appointment'),
+        ('MEDICINE', 'Medicine'),
+        ('PHARMACY', 'Pharmacy'),
+        ('SYSTEM', 'System'),
+    ]
+    
+    # Core fields
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+        help_text="User who receives the notification (patient/doctor/admin)"
+    )
+    title = models.CharField(
+        max_length=255,
+        help_text="Notification title (short summary)"
+    )
+    message = models.TextField(
+        help_text="Notification message (detailed content)"
+    )
+    notification_type = models.CharField(
+        max_length=20,
+        choices=NOTIFICATION_TYPES,
+        default='SYSTEM',
+        help_text="Type of notification for filtering and routing"
+    )
+    
+    # Status tracking
+    is_read = models.BooleanField(
+        default=False,
+        help_text="Whether user has read this notification"
+    )
+    
+    # Reference fields (for audit and relationship tracking)
+    appointment = models.ForeignKey(
+        Appointment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='notifications',
+        help_text="Associated appointment (if applicable)"
+    )
+    medicine = models.ForeignKey(
+        Medicine,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='notifications',
+        help_text="Associated medicine (if applicable)"
+    )
+    pharmacy = models.ForeignKey(
+        Pharmacy,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='notifications',
+        help_text="Associated pharmacy (if applicable)"
+    )
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True, help_text="When notification was marked as read")
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+            models.Index(fields=['user', 'is_read']),
+            models.Index(fields=['notification_type']),
+            models.Index(fields=['created_at']),
+        ]
+    
+    def __str__(self):
+        return f"[{self.notification_type}] {self.title} → {self.user.username}"
+    
+    def mark_as_read(self):
+        """Mark notification as read."""
+        if not self.is_read:
+            self.is_read = True
+            self.read_at = timezone.now()
+            self.save()
+    
+    def get_summary(self):
+        """Get notification summary for low-bandwidth transmission."""
+        return {
+            'id': self.id,
+            'title': self.title,
+            'message': self.message,
+            'type': self.notification_type,
+            'is_read': self.is_read,
+            'created_at': self.created_at.isoformat(),
+        }
+
+
+class NotificationPreference(models.Model):
+    """
+    User notification preferences for controlling alert delivery.
+    
+    Allows users to:
+    - Enable/disable specific notification types
+    - Choose delivery methods (in-app, SMS, etc.)
+    - Set quiet hours for notifications
+    """
+    
+    DELIVERY_METHODS = [
+        ('IN_APP', 'In-app notification'),
+        ('SMS', 'SMS (future)'),
+        ('EMAIL', 'Email (future)'),
+    ]
+    
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='notification_preferences'
+    )
+    
+    # Type preferences
+    appointment_notifications = models.BooleanField(default=True)
+    medicine_notifications = models.BooleanField(default=True)
+    pharmacy_notifications = models.BooleanField(default=True)
+    system_notifications = models.BooleanField(default=True)
+    
+    # Delivery preferences
+    preferred_delivery = models.CharField(
+        max_length=20,
+        choices=DELIVERY_METHODS,
+        default='IN_APP'
+    )
+    
+    # Quiet hours
+    quiet_hours_enabled = models.BooleanField(default=False)
+    quiet_hours_start = models.TimeField(
+        null=True,
+        blank=True,
+        help_text="Start of quiet hours (HH:MM format)"
+    )
+    quiet_hours_end = models.TimeField(
+        null=True,
+        blank=True,
+        help_text="End of quiet hours (HH:MM format)"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"Notification preferences for {self.user.username}"
+    
+    def is_notification_enabled(self, notification_type):
+        """Check if notification type is enabled."""
+        preference_map = {
+            'APPOINTMENT': self.appointment_notifications,
+            'MEDICINE': self.medicine_notifications,
+            'PHARMACY': self.pharmacy_notifications,
+            'SYSTEM': self.system_notifications,
+        }
+        return preference_map.get(notification_type, True)
