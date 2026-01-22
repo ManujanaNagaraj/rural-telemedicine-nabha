@@ -8,11 +8,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.models import User
 from django.db.models import Q
 
-from .models import Patient, Doctor, Appointment, Pharmacy, Medicine, PharmacyInventory
+from .models import Patient, Doctor, Appointment, Pharmacy, Medicine, PharmacyInventory, Notification, NotificationPreference
 from .serializers import (
     PatientSerializer, DoctorSerializer, AppointmentSerializer,
     MedicineSerializer, PharmacySerializer, PharmacyInventorySerializer,
-    PharmacyInventoryUpdateSerializer, MedicineAvailabilitySerializer
+    PharmacyInventoryUpdateSerializer, MedicineAvailabilitySerializer,
+    NotificationSerializer, NotificationMarkReadSerializer, NotificationPreferenceSerializer
 )
 from .permissions import (
     IsOwnPatientRecord, IsOwnDoctorRecord, IsAppointmentParticipant,
@@ -25,6 +26,7 @@ from .auth_serializers import (
 )
 from .error_messages import ErrorMessages
 from .ai.rule_engine import evaluate_symptoms
+from .notification_service import NotificationService
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -386,6 +388,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         try:
             appointment.confirm()
+            
+            # Send notifications to patient and doctor
+            notification_service = NotificationService()
+            notification_service.notify_appointment_confirmed(appointment)
+            
             serializer = self.get_serializer(appointment)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValidationError as e:
@@ -413,6 +420,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         try:
             appointment.complete()
+            
+            # Send notifications to patient and doctor
+            notification_service = NotificationService()
+            notification_service.notify_appointment_completed(appointment)
+            
             serializer = self.get_serializer(appointment)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValidationError as e:
@@ -461,6 +473,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         try:
             appointment.cancel(reason=reason, cancelled_by=cancelled_by)
+            
+            # Send notifications to patient and doctor
+            notification_service = NotificationService()
+            notification_service.notify_appointment_cancelled(appointment, reason)
+            
             serializer = self.get_serializer(appointment)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValidationError as e:
@@ -484,6 +501,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         
         try:
             appointment.mark_no_show()
+            
+            # Send notifications to patient and doctor
+            notification_service = NotificationService()
+            notification_service.notify_appointment_no_show(appointment)
+            
             serializer = self.get_serializer(appointment)
             return Response(serializer.data, status=status.HTTP_200_OK)
         except ValidationError as e:
@@ -882,3 +904,149 @@ class PharmacyInventoryViewSet(viewsets.ModelViewSet):
             'pharmacy_contact': pharmacy.contact_number,
             'medicines': serializer.data
         }, status=status.HTTP_200_OK)
+
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for Notification management - users can view and manage their own notifications.
+    
+    Features:
+    - GET /api/notifications/ - List user's notifications
+    - GET /api/notifications/{id}/ - Get specific notification
+    - PATCH /api/notifications/{id}/mark_read/ - Mark notification as read
+    - GET /api/notifications/unread_count/ - Get unread notification count
+    - GET /api/notifications/?type=APPOINTMENT - Filter by type
+    """
+    
+    serializer_class = NotificationSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return only current user's notifications."""
+        user = self.request.user
+        queryset = Notification.objects.filter(user=user)
+        
+        # Filter by notification type if specified
+        notification_type = self.request.query_params.get('type')
+        if notification_type:
+            queryset = queryset.filter(notification_type=notification_type)
+        
+        # Filter by read status if specified
+        is_read = self.request.query_params.get('is_read')
+        if is_read is not None:
+            is_read = is_read.lower() == 'true'
+            queryset = queryset.filter(is_read=is_read)
+        
+        return queryset.order_by('-created_at')
+    
+    @action(detail=True, methods=['patch'])
+    def mark_read(self, request, pk=None):
+        """
+        Mark notification as read.
+        
+        Request Body (optional):
+        {
+            "is_read": true
+        }
+        """
+        notification = self.get_object()
+        
+        # Check permission: user can only mark their own notifications as read
+        if notification.user != request.user:
+            return Response(
+                {'detail': 'You can only mark your own notifications as read.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = NotificationMarkReadSerializer(data=request.data, partial=True)
+        if serializer.is_valid():
+            is_read = serializer.validated_data.get('is_read', True)
+            
+            if is_read:
+                notification.mark_as_read()
+            else:
+                # Mark as unread
+                notification.is_read = False
+                notification.read_at = None
+                notification.save()
+            
+            return Response(
+                {
+                    'detail': 'Notification marked as read.' if is_read else 'Notification marked as unread.',
+                    'notification': NotificationSerializer(notification).data
+                },
+                status=status.HTTP_200_OK
+            )
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        """Get count of unread notifications for current user."""
+        user = request.user
+        unread_count = Notification.objects.filter(user=user, is_read=False).count()
+        
+        return Response({
+            'username': user.username,
+            'unread_count': unread_count
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['post'])
+    def mark_all_as_read(self, request):
+        """Mark all notifications as read for current user."""
+        user = request.user
+        unread_notifications = Notification.objects.filter(user=user, is_read=False)
+        count = unread_notifications.count()
+        
+        for notification in unread_notifications:
+            notification.mark_as_read()
+        
+        return Response({
+            'detail': f'Marked {count} notifications as read.',
+            'notifications_marked': count
+        }, status=status.HTTP_200_OK)
+
+
+class NotificationPreferenceViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Notification Preferences - users can manage their notification settings.
+    
+    Features:
+    - GET /api/notification-preferences/my_preferences/ - Get user's preferences
+    - PUT /api/notification-preferences/my_preferences/ - Update preferences
+    """
+    
+    serializer_class = NotificationPreferenceSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return only current user's preference."""
+        user = self.request.user
+        return NotificationPreference.objects.filter(user=user)
+    
+    @action(detail=False, methods=['get', 'put'])
+    def my_preferences(self, request):
+        """
+        Get or update current user's notification preferences.
+        
+        GET: Retrieve preferences
+        PUT: Update preferences
+        """
+        user = request.user
+        
+        try:
+            preference = NotificationPreference.objects.get(user=user)
+        except NotificationPreference.DoesNotExist:
+            # Create default preference if doesn't exist
+            preference = NotificationPreference.objects.create(user=user)
+        
+        if request.method == 'GET':
+            serializer = self.get_serializer(preference)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        
+        elif request.method == 'PUT':
+            serializer = self.get_serializer(preference, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
