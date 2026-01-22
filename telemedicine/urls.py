@@ -4,7 +4,8 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     PatientViewSet, DoctorViewSet, AppointmentViewSet, 
     CustomTokenObtainPairView, LoginView, symptom_checker,
-    MedicineViewSet, PharmacyViewSet, PharmacyInventoryViewSet
+    MedicineViewSet, PharmacyViewSet, PharmacyInventoryViewSet,
+    NotificationViewSet, NotificationPreferenceViewSet
 )
 
 router = DefaultRouter()
@@ -14,6 +15,8 @@ router.register(r'appointments', AppointmentViewSet, basename='appointment')
 router.register(r'medicines', MedicineViewSet, basename='medicine')
 router.register(r'pharmacies', PharmacyViewSet, basename='pharmacy')
 router.register(r'pharmacy-inventory', PharmacyInventoryViewSet, basename='pharmacy_inventory')
+router.register(r'notifications', NotificationViewSet, basename='notification')
+router.register(r'notification-preferences', NotificationPreferenceViewSet, basename='notification_preference')
 router.register(r'auth', LoginView, basename='auth')
 
 urlpatterns = [
