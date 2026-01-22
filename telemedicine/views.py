@@ -19,6 +19,7 @@ from .auth_serializers import (
     CustomTokenObtainPairSerializer, LoginSerializer, 
     UserSerializer, LogoutSerializer
 )
+from .error_messages import ErrorMessages
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -163,13 +164,13 @@ class PatientViewSet(viewsets.ModelViewSet):
         user_id = serializer.initial_data.get('user')
         if user_id and int(user_id) != self.request.user.id:
             raise PermissionDenied(
-                detail="You can only create a patient record for yourself"
+                detail=ErrorMessages.PATIENT_CREATE_OTHER
             )
         
         # Check if patient already exists for this user
         if Patient.objects.filter(user=self.request.user).exists():
             raise ValidationError(
-                detail="Patient profile already exists for this user"
+                detail=ErrorMessages.PATIENT_DUPLICATE
             )
         
         serializer.save()
@@ -180,7 +181,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_staff:
             if serializer.instance.user != self.request.user:
                 raise PermissionDenied(
-                    detail="You can only modify your own patient record"
+                    detail=ErrorMessages.PATIENT_MODIFY_OTHER
                 )
         
         serializer.save()
@@ -189,7 +190,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         """Prevent deletion of patient records"""
         if not self.request.user.is_staff:
             raise PermissionDenied(
-                detail="Patient records cannot be deleted by non-admin users"
+                detail=ErrorMessages.PATIENT_DELETE_RESTRICTED
             )
         instance.delete()
 
@@ -254,13 +255,13 @@ class DoctorViewSet(viewsets.ModelViewSet):
         user_id = serializer.initial_data.get('user')
         if user_id and int(user_id) != self.request.user.id:
             raise PermissionDenied(
-                detail="You can only create a doctor record for yourself"
+                detail=ErrorMessages.DOCTOR_CREATE_OTHER
             )
         
         # Check if doctor already exists for this user
         if Doctor.objects.filter(user=self.request.user).exists():
             raise ValidationError(
-                detail="Doctor profile already exists for this user"
+                detail=ErrorMessages.DOCTOR_DUPLICATE
             )
         
         serializer.save()
@@ -271,7 +272,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_staff:
             if serializer.instance.user != self.request.user:
                 raise PermissionDenied(
-                    detail="You can only modify your own doctor record"
+                    detail=ErrorMessages.DOCTOR_MODIFY_OTHER
                 )
         
         serializer.save()
@@ -280,7 +281,7 @@ class DoctorViewSet(viewsets.ModelViewSet):
         """Prevent deletion of doctor records"""
         if not self.request.user.is_staff:
             raise PermissionDenied(
-                detail="Doctor records cannot be deleted by non-admin users"
+                detail=ErrorMessages.DOCTOR_DELETE_RESTRICTED
             )
         instance.delete()
 
@@ -346,7 +347,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         valid_statuses = ['Scheduled', 'Completed', 'Cancelled', 'No-show']
         if status_value not in valid_statuses:
             return Response(
-                {'detail': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'},
+                {'detail': ErrorMessages.INVALID_STATUS},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
@@ -354,7 +355,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if status_value == 'Completed' and not request.user.is_staff:
             if not hasattr(request.user, 'doctor') or appointment.doctor.user != request.user:
                 raise PermissionDenied(
-                    detail="Only the assigned doctor can mark an appointment as completed"
+                    detail=ErrorMessages.APPOINTMENT_UPDATE_ROLE
                 )
         
         appointment.status = status_value
@@ -375,10 +376,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 if not self.request.user.is_staff:
                     if patient.user != self.request.user:
                         raise PermissionDenied(
-                            detail="You can only create appointments for yourself"
+                            detail=ErrorMessages.APPOINTMENT_CREATE_SELF
                         )
             except Patient.DoesNotExist:
-                raise ValidationError(detail="Invalid patient ID")
+                raise ValidationError(detail=ErrorMessages.INVALID_PATIENT_ID)
         
         if doctor_id:
             try:
@@ -388,10 +389,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     # Only allow if user is the patient (patient creates appointment with doctor)
                     if not hasattr(self.request.user, 'patient'):
                         raise PermissionDenied(
-                            detail="Invalid appointment creation request"
+                            detail=ErrorMessages.INVALID_REQUEST
                         )
             except Doctor.DoesNotExist:
-                raise ValidationError(detail="Invalid doctor ID")
+                raise ValidationError(detail=ErrorMessages.INVALID_DOCTOR_ID)
         
         serializer.save()
     
@@ -402,7 +403,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         # Cannot modify completed appointments
         if appointment.status == 'Completed':
             raise PermissionDenied(
-                detail="Completed appointments cannot be modified"
+                detail=ErrorMessages.APPOINTMENT_MODIFY_COMPLETED
             )
         
         serializer.save()
@@ -410,5 +411,5 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         """Prevent deletion of appointments - use status change instead"""
         raise PermissionDenied(
-            detail="Appointments cannot be deleted. Update status to 'Cancelled' instead"
+            detail=ErrorMessages.APPOINTMENT_DELETE_RESTRICTED
         )
