@@ -3,13 +3,17 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     PatientViewSet, DoctorViewSet, AppointmentViewSet, 
-    CustomTokenObtainPairView, LoginView, symptom_checker
+    CustomTokenObtainPairView, LoginView, symptom_checker,
+    MedicineViewSet, PharmacyViewSet, PharmacyInventoryViewSet
 )
 
 router = DefaultRouter()
 router.register(r'patients', PatientViewSet, basename='patient')
 router.register(r'doctors', DoctorViewSet, basename='doctor')
 router.register(r'appointments', AppointmentViewSet, basename='appointment')
+router.register(r'medicines', MedicineViewSet, basename='medicine')
+router.register(r'pharmacies', PharmacyViewSet, basename='pharmacy')
+router.register(r'pharmacy-inventory', PharmacyInventoryViewSet, basename='pharmacy_inventory')
 router.register(r'auth', LoginView, basename='auth')
 
 urlpatterns = [

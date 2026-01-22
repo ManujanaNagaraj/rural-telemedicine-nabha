@@ -8,8 +8,12 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.models import User
 from django.db.models import Q
 
-from .models import Patient, Doctor, Appointment
-from .serializers import PatientSerializer, DoctorSerializer, AppointmentSerializer
+from .models import Patient, Doctor, Appointment, Pharmacy, Medicine, PharmacyInventory
+from .serializers import (
+    PatientSerializer, DoctorSerializer, AppointmentSerializer,
+    MedicineSerializer, PharmacySerializer, PharmacyInventorySerializer,
+    PharmacyInventoryUpdateSerializer, MedicineAvailabilitySerializer
+)
 from .permissions import (
     IsOwnPatientRecord, IsOwnDoctorRecord, IsAppointmentParticipant,
     CannotCreatePatientForOthers, CannotCreateDoctorForOthers,
@@ -660,3 +664,221 @@ def symptom_checker(request):
             'detail': 'Method not allowed. Use POST to submit symptoms.',
             'allowed_methods': ['POST']
         }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+
+class MedicineViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for Medicine model - read-only for all authenticated users.
+    
+    Provides:
+    - GET /api/medicines/ - List all medicines
+    - GET /api/medicines/{id}/ - Get medicine details
+    """
+    queryset = Medicine.objects.all()
+    serializer_class = MedicineSerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Get all medicines, optionally filtered."""
+        queryset = Medicine.objects.all()
+        
+        # Filter by prescription requirement if specified
+        is_prescription = self.request.query_params.get('is_prescription_required')
+        if is_prescription is not None:
+            is_prescription = is_prescription.lower() == 'true'
+            queryset = queryset.filter(is_prescription_required=is_prescription)
+        
+        # Search by name
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+        
+        return queryset
+
+
+class PharmacyViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for Pharmacy model - read-only access for all authenticated users.
+    
+    Provides:
+    - GET /api/pharmacies/ - List all active pharmacies
+    - GET /api/pharmacies/{id}/ - Get pharmacy details with inventory
+    """
+    queryset = Pharmacy.objects.filter(is_active=True)
+    serializer_class = PharmacySerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Get all active pharmacies, optionally filtered."""
+        queryset = Pharmacy.objects.filter(is_active=True)
+        
+        # Filter by location/area
+        location = self.request.query_params.get('location')
+        if location:
+            queryset = queryset.filter(location__icontains=location)
+        
+        # Search by name
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(name__icontains=search)
+        
+        return queryset
+
+
+class PharmacyInventoryViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Pharmacy Inventory management.
+    
+    Features:
+    - GET /api/pharmacy-inventory/ - List inventory (filtered for active pharmacies, stock > 0)
+    - GET /api/pharmacy-inventory/?medicine_id=X - Get availability of specific medicine
+    - PATCH /api/pharmacy-inventory/{id}/update_quantity/ - Update inventory (pharmacy/admin only)
+    
+    Permissions:
+    - Read: All authenticated users
+    - Write: Pharmacy staff and admin only
+    """
+    serializer_class = PharmacyInventorySerializer
+    permission_classes = [IsAuthenticated]
+    
+    def get_queryset(self):
+        """Get inventory for active pharmacies with stock > 0."""
+        queryset = PharmacyInventory.objects.filter(
+            pharmacy__is_active=True,
+            quantity_available__gt=0
+        ).select_related('pharmacy', 'medicine')
+        
+        return queryset
+    
+    def get_serializer_class(self):
+        """Use different serializer for update action."""
+        if self.action == 'update_quantity':
+            return PharmacyInventoryUpdateSerializer
+        return PharmacyInventorySerializer
+    
+    @action(detail=True, methods=['patch'], permission_classes=[IsAuthenticated])
+    def update_quantity(self, request, pk=None):
+        """
+        Update inventory quantity for a medicine at a pharmacy.
+        
+        Only pharmacy staff and admin can perform this action.
+        
+        Request Body:
+        {
+            "quantity": 50,
+            "reason": "Restock from distributor"
+        }
+        """
+        inventory = self.get_object()
+        
+        # Permission check: Only pharmacy staff or admin can update
+        if not request.user.is_staff:
+            # Check if user has pharmacy access (optional - can be extended)
+            return Response(
+                {'detail': 'Only admin and pharmacy staff can update inventory.'},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            quantity = serializer.validated_data['quantity']
+            
+            try:
+                inventory.update_quantity(quantity)
+                return Response(
+                    {
+                        'detail': 'Inventory updated successfully',
+                        'medicine': inventory.medicine.name,
+                        'pharmacy': inventory.pharmacy.name,
+                        'new_quantity': inventory.quantity_available
+                    },
+                    status=status.HTTP_200_OK
+                )
+            except ValidationError as e:
+                return Response(
+                    {'detail': str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def by_medicine(self, request):
+        """
+        Get all pharmacies with a specific medicine in stock.
+        
+        Query Parameters:
+        - medicine_id: Required. The medicine ID
+        
+        Example: GET /api/pharmacy-inventory/by_medicine/?medicine_id=5
+        """
+        medicine_id = request.query_params.get('medicine_id')
+        
+        if not medicine_id:
+            return Response(
+                {'detail': 'medicine_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            medicine = Medicine.objects.get(id=medicine_id)
+        except Medicine.DoesNotExist:
+            return Response(
+                {'detail': f'Medicine with ID {medicine_id} not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all inventory items for this medicine with stock > 0
+        inventory_items = PharmacyInventory.objects.filter(
+            medicine=medicine,
+            pharmacy__is_active=True,
+            quantity_available__gt=0
+        ).select_related('pharmacy', 'medicine')
+        
+        availability_data = {
+            'medicine_id': medicine.id,
+            'medicine_name': medicine.name,
+            'is_prescription_required': medicine.is_prescription_required,
+            'inventory_items': inventory_items
+        }
+        
+        serializer = MedicineAvailabilitySerializer(availability_data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def by_pharmacy(self, request):
+        """
+        Get all medicines available at a specific pharmacy.
+        
+        Query Parameters:
+        - pharmacy_id: Required. The pharmacy ID
+        
+        Example: GET /api/pharmacy-inventory/by_pharmacy/?pharmacy_id=3
+        """
+        pharmacy_id = request.query_params.get('pharmacy_id')
+        
+        if not pharmacy_id:
+            return Response(
+                {'detail': 'pharmacy_id query parameter is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            pharmacy = Pharmacy.objects.get(id=pharmacy_id, is_active=True)
+        except Pharmacy.DoesNotExist:
+            return Response(
+                {'detail': f'Active pharmacy with ID {pharmacy_id} not found.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get all medicines at this pharmacy with stock > 0
+        inventory_items = pharmacy.inventory.filter(quantity_available__gt=0)
+        serializer = self.get_serializer(inventory_items, many=True)
+        
+        return Response({
+            'pharmacy_id': pharmacy.id,
+            'pharmacy_name': pharmacy.name,
+            'pharmacy_location': pharmacy.location,
+            'pharmacy_contact': pharmacy.contact_number,
+            'medicines': serializer.data
+        }, status=status.HTTP_200_OK)
