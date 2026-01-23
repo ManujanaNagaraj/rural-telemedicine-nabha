@@ -10,6 +10,17 @@ class Patient(models.Model):
     phone_number = models.CharField(max_length=15)
     address = models.TextField()
     emergency_contact = models.CharField(max_length=15, blank=True)
+    
+    # Sync metadata for offline-first capabilities
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['updated_at']),
+            models.Index(fields=['last_synced_at']),
+        ]
 
     def __str__(self):
         return f"{self.user.first_name} {self.user.last_name}"
@@ -21,6 +32,17 @@ class Doctor(models.Model):
     phone_number = models.CharField(max_length=15)
     experience_years = models.PositiveIntegerField()
     is_available = models.BooleanField(default=True)
+    
+    # Sync metadata for offline-first capabilities
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['updated_at']),
+            models.Index(fields=['last_synced_at']),
+        ]
 
     def __str__(self):
         return f"Dr. {self.user.first_name} {self.user.last_name} - {self.specialization}"
@@ -77,11 +99,14 @@ class Appointment(models.Model):
     )
     
     # Audit fields
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
     confirmed_at = models.DateTimeField(null=True, blank=True, help_text="When appointment was confirmed")
     completed_at = models.DateTimeField(null=True, blank=True, help_text="When appointment was completed")
     cancelled_at = models.DateTimeField(null=True, blank=True, help_text="When appointment was cancelled")
+    
+    # Sync metadata for offline-first capabilities
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
     
     class Meta:
         ordering = ['-appointment_date']
@@ -178,8 +203,9 @@ class Pharmacy(models.Model):
         default=True,
         help_text="Whether this pharmacy is currently operational"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
     
     class Meta:
         ordering = ['name']
@@ -217,8 +243,9 @@ class Medicine(models.Model):
         default=False,
         help_text="Whether prescription is required to purchase"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
     
     class Meta:
         ordering = ['name']
@@ -265,9 +292,11 @@ class PharmacyInventory(models.Model):
     )
     last_updated = models.DateTimeField(
         auto_now=True,
+        db_index=True,
         help_text="When the quantity was last updated"
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True, help_text="Last successful sync timestamp")
     
     class Meta:
         unique_together = ['pharmacy', 'medicine']
