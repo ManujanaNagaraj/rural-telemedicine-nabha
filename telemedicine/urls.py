@@ -7,6 +7,10 @@ from .views import (
     MedicineViewSet, PharmacyViewSet, PharmacyInventoryViewSet,
     NotificationViewSet, NotificationPreferenceViewSet
 )
+from .sync_views import (
+    PatientSyncViewSet, AppointmentSyncViewSet, PharmacyInventorySyncViewSet,
+    sync_status
+)
 
 router = DefaultRouter()
 router.register(r'patients', PatientViewSet, basename='patient')
@@ -19,6 +23,11 @@ router.register(r'notifications', NotificationViewSet, basename='notification')
 router.register(r'notification-preferences', NotificationPreferenceViewSet, basename='notification_preference')
 router.register(r'auth', LoginView, basename='auth')
 
+# Sync endpoints for offline-first support
+router.register(r'patients/sync', PatientSyncViewSet, basename='patient_sync')
+router.register(r'appointments/sync', AppointmentSyncViewSet, basename='appointment_sync')
+router.register(r'pharmacy-inventory/sync', PharmacyInventorySyncViewSet, basename='pharmacy_inventory_sync')
+
 urlpatterns = [
     # JWT Token endpoints
     path('auth/token/', CustomTokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -28,6 +37,9 @@ urlpatterns = [
     path('auth/login/', LoginView.as_view({'post': 'login'}), name='auth_login'),
     path('auth/logout/', LoginView.as_view({'post': 'logout'}), name='auth_logout'),
     path('auth/me/', LoginView.as_view({'get': 'me'}), name='auth_me'),
+    
+    # Sync status and documentation
+    path('sync/status/', sync_status, name='sync_status'),
     
     # AI Symptom Checker endpoint (no authentication required - public triage)
     path('symptom-check/', symptom_checker, name='symptom_checker'),
